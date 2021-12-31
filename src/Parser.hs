@@ -1,3 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Parser
   ( readExpr
   , readExprFile
@@ -7,7 +9,6 @@ import Control.Applicative hiding ((<|>))
 import Data.Functor.Identity (Identity)
 import qualified Data.Text as T
 import LispVal (LispVal(Atom, Bool, List, Nil, Number, String))
-import Text.Parsec
 import Text.Parsec
   ( ParseError
   , SourceName
@@ -46,6 +47,9 @@ style =
     , Tok.identLetter = digit <|> letter <|> oneOf "?+=|&-/"
     , Tok.reservedOpNames = ["'", "\""]
     }
+
+Tok.TokenParser {Tok.parens = m_parens, Tok.identifier = m_identifier} =
+  Tok.makeTokenParser style
 
 reservedOp :: T.Text -> Parser ()
 reservedOp op = Tok.reservedOp lexer $ T.unpack op
@@ -87,9 +91,8 @@ parseQuote = do
 
 parseReserved :: Parser LispVal
 parseReserved =
-  do reservedOp "Nil" >> return Nil 
-     <|> (reservedOp "#t" >> return (Bool True))
-     <|> (reservedOp "#f" >> return (Bool False))
+  do reservedOp "Nil" >> return Nil <|> (reservedOp "#t" >> return (Bool True)) <|>
+  (reservedOp "#f" >> return (Bool False))
 
 parseExpr :: Parser LispVal
 parseExpr =
