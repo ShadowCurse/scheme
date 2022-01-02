@@ -16,12 +16,12 @@ import Data.Functor ((<&>))
 import Data.Text as T (Text, concat, pack, unpack)
 import Data.Text.IO as TIO (hGetContents, hPutStr)
 
--- import System.Directory ( doesFileExist )
+import System.Directory ( doesFileExist )
 import System.IO (Handle, IOMode(ReadMode, WriteMode), hIsWritable, withFile)
 
 import Control.Exception (throw)
 
--- import Network.HTTP ( getRequest, getResponseBody, simpleHTTP )
+import Network.HTTP ( getRequest, getResponseBody, simpleHTTP )
 import Control.Monad.Except (MonadIO(liftIO), foldM)
 
 type Prim = [(T.Text, LispVal)]
@@ -33,7 +33,7 @@ type Binary = LispVal -> LispVal -> Eval LispVal
 mkF :: ([LispVal] -> Eval LispVal) -> LispVal
 mkF = Fun . IFunc
 
-primEvn :: Prim
+primEnv :: Prim
 primEnv =
   [ ("+", mkF $ binopFold (numOp (+)) (Number 0))
   , ("*", mkF $ binopFold (numOp (*)) (Number 1))
@@ -57,7 +57,9 @@ primEnv =
   , ("car", mkF Prim.car)
   , ("file?", mkF $ unop fileExists)
   , ("slurp", mkF $ unop slurp)
-  ] primEvn :: Prim
+  , ("wslurp", mkF $ unop wSlurp)
+  , ("put"   , mkF $ binop put)
+  ]
 
 unop :: Unary -> [LispVal] -> Eval LispVal
 unop op [x] = op x
@@ -77,7 +79,7 @@ binopFold op farg args =
 fileExists :: LispVal -> Eval LispVal
 fileExists (Atom atom) = fileExists $ String atom
 fileExists (String txt) = Bool <$> liftIO (doesFileExist $ T.unpack txt)
-fileExists val = throw $ TypeMismatch "expects str, got: " val
+fileExists val = throw $ TypeMismatch "read expects string, got: " val
 
 slurp :: LispVal -> Eval LispVal
 slurp (String txt) = liftIO $ wFileSlurp txt
@@ -88,12 +90,43 @@ wFileSlurp fileName = withFile (T.unpack fileName) ReadMode go
   where
     go = readTextFile fileName
 
+openURL :: T.Text -> IO LispVal
+openURL x = do
+  req <- simpleHTTP (getRequest $ T.unpack x)
+  body <- getResponseBody req
+  return $ String $ T.pack body
+
+wSlurp :: LispVal -> Eval LispVal
+wSlurp (String txt) = liftIO $ openURL txt
+wSlurp val = throw $ TypeMismatch "wSlurp expects a string, instead got: " val
+
 readTextFile :: T.Text -> Handle -> IO LispVal
 readTextFile fileName handle = do
-  exists <- hIsEOF handle
+  exists <- doesFileExist $ T.unpack fileName
   if exists
     then (TIO.hGetContents handle) >>= (return . String)
     else throw $ IOError $ T.concat [" file does not exits: ", fileName]
+
+put :: LispVal -> LispVal -> Eval LispVal
+put (String file) (String msg) = liftIO $ wFilePut file msg
+put (String _) val =
+  throw $
+  TypeMismatch
+    "pudt expects sting in the second argument (try using show), instead got: "
+    val
+put val _ = throw $ TypeMismatch "put expects string, instead got: " val
+
+wFilePut :: T.Text -> T.Text -> IO LispVal
+wFilePut fileName msg = withFile (T.unpack fileName) WriteMode go
+  where
+    go = putTextFile fileName msg
+
+putTextFile :: T.Text -> T.Text -> Handle -> IO LispVal
+putTextFile fileName msg handle = do
+  canWrite <- hIsWritable handle
+  if canWrite
+    then (TIO.hPutStr handle msg) >> (return $ String msg)
+    else throw $ IOError $ T.concat [" file does not exist: ", fileName]
 
 cons :: [LispVal] -> Eval LispVal
 cons [x, y@(List yList)] = return $ List $ x : yList
@@ -137,9 +170,9 @@ eqOp op x y = throw $ TypeMismatch "bool op " x
 
 numCmp :: (Integer -> Integer -> Bool) -> LispVal -> LispVal -> Eval LispVal
 numCmp op (Number x) (Number y) = return . Bool $ op x y
-numCmp op x (Number y) = throw $ TypeMismatch "numeric op " x
-numCmp op (Number x) y = throw $ TypeMismatch "numeric op " y
-numCmp op x y = throw $ TypeMismatch "numeric op " x
+numCmp _ x (Number _) = throw $ TypeMismatch "numeric op " x
+numCmp _ (Number _) y = throw $ TypeMismatch "numeric op " y
+numCmp _ x _ = throw $ TypeMismatch "numeric op " x
 
 eqCmd :: LispVal -> LispVal -> Eval LispVal
 eqCmd (Atom x) (Atom y) = return . Bool $ x == y

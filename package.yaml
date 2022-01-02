@@ -26,6 +26,10 @@ dependencies:
 - mtl
 - parsec
 - text
+- haskeline
+- directory
+- HTTP
+- optparse-applicative
 
 library:
   source-dirs: src

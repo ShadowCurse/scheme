@@ -1,23 +1,26 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
-module Eval (
-  evalText,
-  evalFile,
-  runParseTest,
-  safeExec,
+module Eval
+  (
+  evalText
+  , evalFile
+  , runParseTest
+  , safeExec
   -- testing
-  runASTinEnv,
-  basicEnv,
-  fileToEvalForm,
-  textToEvalForm,
-  getFileContents
-) where
+  -- , runASTinEnv
+  -- , basicEnv
+  -- , fileToEvalForm
+  -- , textToEvalForm
+  -- , getFileContents
+  ) where
 
 import LispVal
   ( EnvCtx(..)
   , Eval(unEval)
   , IFunc(IFunc)
+  , LispException(Default, PError, UnboundVar, TypeMismatch,
+                    BadSpecialForm, NotFunction)
   , LispVal(..)
   , showVal
   )
@@ -36,8 +39,8 @@ import Data.Map as Map
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
 
+import Prim (primEnv, unop)
 import Text.Parsec (ParseError)
-import Prim ( primEnv, unop )
 
 import Control.Exception (Exception(fromException), SomeException, throw, try)
 import Control.Monad.Reader
@@ -46,23 +49,61 @@ import Control.Monad.Reader
   , ReaderT(runReaderT)
   , asks
   )
-import GHC.Unicode (GeneralCategory(Control))
+import System.Directory ( doesFileExist )
 
 basicEnv :: Map.Map T.Text LispVal
 basicEnv = Map.fromList $ primEnv <> [("read", Fun $ IFunc $ unop $ readFn)]
 
+readFn :: LispVal -> Eval LispVal
+readFn (String txt) = lineToEvalForm txt
+readFn val = throw $ TypeMismatch "read expects string, instead got: " val
+
+parseFn :: LispVal -> Eval LispVal
+parseFn (String txt) = either (throw . PError . show) return $ readExpr txt
+parseFn val = throw $ TypeMismatch "parse expects sting, instead got: " val
+
+lineToEvalForm :: T.Text -> Eval LispVal
+lineToEvalForm input = either (throw . PError . show) eval $ readExpr input
+
 evalFile :: T.Text -> IO ()
-evalFile fileExpr = (runASTinEnv basicEnv $ fileToEvalForm fileExpr)
+evalFile fileExpr = (runASTinEnv basicEnv $ fileToEvalForm fileExpr) >>= print
 
 fileToEvalForm :: T.Text -> Eval LispVal
 fileToEvalForm input =
   either (throw . PError . show) evalBody $ readExprFile input
 
+-- endOfList :: LispVal -> LispVal -> LispVal
+-- endOfList (List x) expr = List $ x ++ [expr]
+-- endOfList n _  = throw $ TypeMismatch  "failure to get variable: " n
+
+-- parseWithLib :: T.Text -> T.Text -> Either ParseError LispVal
+parseWithLib :: T.Text -> Either ParseError LispVal
+parseWithLib inp = do
+  -- stdlib <- readExprFile sTDLIB std
+  expr   <- readExpr inp
+  return $ expr -- endOfList stdlib expr
+
+-- getFileContents :: FilePath -> IO T.Text
+-- getFileContents fname = do
+--   exists <- doesFileExist fname
+--   if exists then TIO.readFile  fname else return "File does not exist."
+
+-- textToEvalForm :: T.Text -> T.Text -> Eval LispVal
+textToEvalForm :: T.Text -> Eval LispVal
+textToEvalForm input = either (throw . PError . show ) evalBody $ parseWithLib input
+
+evalText :: T.Text -> IO () --REPL
+evalText textExpr = do
+  -- stdlib <- getFileContents sTDLIB
+  -- stdlib <- T.pack ""
+  res <- runASTinEnv basicEnv $ textToEvalForm textExpr
+  print res
+
 runParseTest :: T.Text -> T.Text -- for view AST
 runParseTest input = either (T.pack . show) (T.pack . show) $ readExpr input
 
 runASTinEnv :: EnvCtx -> Eval b -> IO b
-runASTinEnv code action = runResourceT $ runReaderT (unEval action) code
+runASTinEnv code action = runReaderT (unEval action) code
 
 getVar :: LispVal -> Eval LispVal
 getVar (Atom atom) = do
@@ -70,6 +111,7 @@ getVar (Atom atom) = do
   case Map.lookup atom env of
     Just x -> return x
     Nothing -> throw $ UnboundVar atom
+getVar n = throw $ TypeMismatch  "failure to get variable: " n
 
 getEven :: [t] -> [t]
 getEven [] = []
@@ -112,8 +154,10 @@ safeExec :: IO a -> IO (Either String a)
 safeExec m = do
   result <- Control.Exception.try m
   case result of
-    Left (enclosed :: LispException) -> return $ Left (show enclosed)
-    Nothing -> return $ Left (show eTop)
+    Left (eTop :: SomeException) ->
+      case fromException eTop of
+        Just (enclosed :: LispException) -> return $ Left (show enclosed)
+        Nothing -> return $ Left (show eTop)
     Right val -> return $ Right val
 
 eval :: LispVal -> Eval LispVal

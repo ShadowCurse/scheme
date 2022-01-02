@@ -1,6 +1,4 @@
-module Main where
-
-import LispVal (LispVal(Atom, Bool, List, Nil, Number, String))
+import qualified Cli
 
 main :: IO ()
-main = putStr "qwfp"
+main = Cli.cliIface

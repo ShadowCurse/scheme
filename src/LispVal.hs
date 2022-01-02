@@ -13,7 +13,8 @@ module LispVal
 import qualified Data.Map as Map
 import qualified Data.Text as T
 
-import Control.Monad.Except
+-- import Control.Monad.Except
+import Control.Exception ( Exception )
 import Control.Monad.Reader (MonadIO, MonadReader, ReaderT(ReaderT))
 
 type EnvCtx = Map.Map T.Text LispVal
@@ -70,6 +71,8 @@ data LispException
   | Default LispVal
   | PError String -- from show anyway
   | IOError T.Text
+
+instance Exception LispException
 
 instance Show LispException where
   show = T.unpack . showError

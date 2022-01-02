@@ -26,6 +26,8 @@ import Text.Parsec
   , sepBy
   , string
   , try
+  , many
+  , noneOf
   )
 import Text.Parsec.Expr
 import qualified Text.Parsec.Language as Lang
@@ -91,8 +93,9 @@ parseQuote = do
 
 parseReserved :: Parser LispVal
 parseReserved =
-  do reservedOp "Nil" >> return Nil <|> (reservedOp "#t" >> return (Bool True)) <|>
-  (reservedOp "#f" >> return (Bool False))
+  do reservedOp "Nil" >> return Nil
+     <|> (reservedOp "#t" >> return (Bool True))
+     <|> (reservedOp "#f" >> return (Bool False))
 
 parseExpr :: Parser LispVal
 parseExpr =
