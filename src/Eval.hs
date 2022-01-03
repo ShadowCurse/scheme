@@ -1,9 +1,9 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE RecordWildCards #-}
 
 module Eval
-  (
-  evalText
+  ( evalText
   , evalFile
   , runParseTest
   , safeExec
@@ -19,8 +19,8 @@ import LispVal
   ( EnvCtx(..)
   , Eval(unEval)
   , IFunc(IFunc)
-  , LispException(Default, PError, UnboundVar, TypeMismatch,
-                    BadSpecialForm, NotFunction)
+  , LispException(BadSpecialForm, Default, NotFunction, PError,
+              TypeMismatch, UnboundVar)
   , LispVal(..)
   , showVal
   )
@@ -49,10 +49,56 @@ import Control.Monad.Reader
   , ReaderT(runReaderT)
   , asks
   )
-import System.Directory ( doesFileExist )
+import System.Directory (doesFileExist)
 
-basicEnv :: Map.Map T.Text LispVal
-basicEnv = Map.fromList $ primEnv <> [("read", Fun $ IFunc $ unop $ readFn)]
+sTDLIB :: FilePath
+sTDLIB = "lib/stdlib.scm"
+
+funcEnv :: Map.Map T.Text LispVal
+funcEnv =
+  Map.fromList $
+  primEnv <>
+  [ ("read", Fun $ IFunc $ unop readFn)
+  , ("parse", Fun $ IFunc $ unop parseFn)
+  , ("eval", Fun $ IFunc $ unop eval)
+  , ("show", Fun $ IFunc $ unop (return . String . showVal))
+  ]
+
+basicEnv :: EnvCtx
+basicEnv = EnvCtx Map.empty funcEnv
+
+updateEnv :: T.Text -> LispVal -> EnvCtx -> EnvCtx
+updateEnv var e@(Fun _) EnvCtx {..} = EnvCtx env $ Map.insert var e fenv
+updateEnv var e@(Lambda _ _) EnvCtx {..} = EnvCtx env $ Map.insert var e fenv
+updateEnv var e EnvCtx {..} = EnvCtx (Map.insert var e env) fenv
+
+appendToList :: LispVal -> LispVal -> LispVal
+appendToList (List x) expr = List $ x ++ [expr]
+appendToList n _ = throw $ TypeMismatch "failure to get variable: " n
+
+getFileContents :: FilePath -> IO T.Text
+getFileContents fname = do
+  exists <- doesFileExist fname
+  if exists
+    then TIO.readFile fname
+    else return "File does not exist."
+
+combineWithStdLib :: T.Text -> T.Text -> Either ParseError LispVal
+combineWithStdLib std input = do
+  stdlib <- readExprFile std
+  expr <- readExpr input
+  return $ appendToList stdlib expr
+
+lineToEvalForm :: T.Text -> Eval LispVal
+lineToEvalForm input = either (throw . PError . show) eval $ readExpr input
+
+textToEvalForm :: T.Text -> T.Text -> Eval LispVal
+textToEvalForm std input =
+  either (throw . PError . show) evalBody $ combineWithStdLib std input
+
+fileToEvalForm :: T.Text -> Eval LispVal
+fileToEvalForm input =
+  either (throw . PError . show) evalBody $ readExprFile input
 
 readFn :: LispVal -> Eval LispVal
 readFn (String txt) = lineToEvalForm txt
@@ -62,56 +108,28 @@ parseFn :: LispVal -> Eval LispVal
 parseFn (String txt) = either (throw . PError . show) return $ readExpr txt
 parseFn val = throw $ TypeMismatch "parse expects sting, instead got: " val
 
-lineToEvalForm :: T.Text -> Eval LispVal
-lineToEvalForm input = either (throw . PError . show) eval $ readExpr input
-
-evalFile :: T.Text -> IO ()
-evalFile fileExpr = (runASTinEnv basicEnv $ fileToEvalForm fileExpr) >>= print
-
-fileToEvalForm :: T.Text -> Eval LispVal
-fileToEvalForm input =
-  either (throw . PError . show) evalBody $ readExprFile input
-
--- endOfList :: LispVal -> LispVal -> LispVal
--- endOfList (List x) expr = List $ x ++ [expr]
--- endOfList n _  = throw $ TypeMismatch  "failure to get variable: " n
-
--- parseWithLib :: T.Text -> T.Text -> Either ParseError LispVal
-parseWithLib :: T.Text -> Either ParseError LispVal
-parseWithLib inp = do
-  -- stdlib <- readExprFile sTDLIB std
-  expr   <- readExpr inp
-  return $ expr -- endOfList stdlib expr
-
--- getFileContents :: FilePath -> IO T.Text
--- getFileContents fname = do
---   exists <- doesFileExist fname
---   if exists then TIO.readFile  fname else return "File does not exist."
-
--- textToEvalForm :: T.Text -> T.Text -> Eval LispVal
-textToEvalForm :: T.Text -> Eval LispVal
-textToEvalForm input = either (throw . PError . show ) evalBody $ parseWithLib input
-
 evalText :: T.Text -> IO () --REPL
 evalText textExpr = do
-  -- stdlib <- getFileContents sTDLIB
-  -- stdlib <- T.pack ""
-  res <- runASTinEnv basicEnv $ textToEvalForm textExpr
+  stdlib <- getFileContents sTDLIB
+  res <- runASTinEnv basicEnv (textToEvalForm stdlib textExpr)
   print res
+
+evalFile :: T.Text -> IO ()
+evalFile fileExpr = runASTinEnv basicEnv (fileToEvalForm fileExpr) >>= print
 
 runParseTest :: T.Text -> T.Text -- for view AST
 runParseTest input = either (T.pack . show) (T.pack . show) $ readExpr input
 
 runASTinEnv :: EnvCtx -> Eval b -> IO b
-runASTinEnv code action = runReaderT (unEval action) code
+runASTinEnv env code = runReaderT (unEval code) env
 
 getVar :: LispVal -> Eval LispVal
 getVar (Atom atom) = do
-  env <- ask
-  case Map.lookup atom env of
+  EnvCtx {..} <- ask
+  case Map.lookup atom (Map.union fenv env) of
     Just x -> return x
     Nothing -> throw $ UnboundVar atom
-getVar n = throw $ TypeMismatch  "failure to get variable: " n
+getVar n = throw $ TypeMismatch "failure to get variable: " n
 
 getEven :: [t] -> [t]
 getEven [] = []
@@ -128,27 +146,12 @@ ensureAtom n = throw $ TypeMismatch "atom" n
 extractVar :: LispVal -> T.Text
 extractVar (Atom atom) = atom
 
-evalBody :: LispVal -> Eval LispVal
-evalBody (List [List ((:) (Atom "define") [Atom var, defExpr]), rest]) = do
-  evalVal <- eval defExpr
-  env <- ask
-  local (const $ Map.insert var evalVal env) $ eval rest
-evalBody (List ((:) (List ((:) (Atom "define") [Atom var, defExpr])) rest)) = do
-  evalVal <- eval defExpr
-  env <- ask
-  let envFn = const $ Map.insert var evalVal env
-   in local envFn $ evalBody $ List rest
-evalBody x = eval x
+isLambda :: LispVal -> Bool
+isLambda (List ((Atom "lambda"):_)) = True
+isLambda _ = False
 
 applyLambda :: LispVal -> [LispVal] -> [LispVal] -> Eval LispVal
-applyLambda expr params args = do
-  env <- ask
-  argEval <- mapM eval args
-  let env' =
-        Map.fromList
-          (Prelude.zipWith (\a b -> (extractVar a, b)) params argEval) <>
-        env
-   in local (const env') $ eval expr
+applyLambda expr params args = bindArgsEval params args expr
 
 safeExec :: IO a -> IO (Either String a)
 safeExec m = do
@@ -160,48 +163,72 @@ safeExec m = do
         Nothing -> return $ Left (show eTop)
     Right val -> return $ Right val
 
+bindArgsEval :: [LispVal] -> [LispVal] -> LispVal -> Eval LispVal
+bindArgsEval params args expr = do
+  EnvCtx {..} <- ask
+  let newVars = zipWith (\a b -> (extractVar a, b)) params args
+  let (newEnv, newFenv) = Map.partition (not . isLambda) $ Map.fromList newVars
+  local (const $ EnvCtx (newEnv <> env) (newFenv <> fenv)) $ eval expr
+
+evalBody :: LispVal -> Eval LispVal
+evalBody (List [List ((:) (Atom "define") [Atom var, defExpr]), rest]) = do
+  evalVal <- eval defExpr
+  ctx <- ask
+  local (const $ updateEnv var evalVal ctx) $ eval rest
+evalBody (List ((:) (List ((:) (Atom "define") [Atom var, defExpr])) rest)) = do
+  evalVal <- eval defExpr
+  ctx <- ask
+  local (const $ updateEnv var evalVal ctx) $ evalBody $ List rest
+evalBody x = eval x
+
 eval :: LispVal -> Eval LispVal
 eval (List [Atom "quote", val]) = return val
 eval (Number i) = return $ Number i
-eval (String i) = return $ String i
-eval (Bool i) = return $ Bool i
-eval (List i) = return Nil
+eval (String s) = return $ String s
+eval (Bool b) = return $ Bool b
+eval (List []) = return Nil
 eval Nil = return Nil
+eval n@(Atom _) = getVar n
 eval (List [Atom "write", rest]) = return . String . T.pack $ show rest
 eval (List ((:) (Atom "write") rest)) =
   return . String . T.pack . show $ List rest
-eval n@(Atom _) = getVar n
-eval (List [Atom "if", pred, truExpr, flsExpr]) = do
+eval (List [Atom "if", pred, trueExpr, falseExpr]) = do
   ifRes <- eval pred
   case ifRes of
-    (Bool True) -> eval truExpr
-    (Bool False) -> eval flsExpr
+    (Bool True) -> eval trueExpr
+    (Bool False) -> eval falseExpr
     _ -> throw $ BadSpecialForm "if"
+eval (List ((:) (Atom "if") _)) =
+  throw $ BadSpecialForm "(if <bool> <s-expr> <s-expr>)"
 eval (List [Atom "let", List pairs, expr]) = do
-  env <- ask
+  EnvCtx {} <- ask
   atoms <- mapM ensureAtom $ getEven pairs
   vals <- mapM eval $ getOdd pairs
-  let env' =
-        Map.fromList (Prelude.zipWith (\a b -> (extractVar a, b)) atoms vals) <>
-        env
-   in local (const env') $ evalBody expr
+  bindArgsEval atoms vals expr
+eval (List (Atom "let":_)) =
+  throw $
+  BadSpecialForm
+    "let function expects list of parameters and S-Expression body\n(let <pairs> <s-expr>)"
 eval (List [Atom "begin", rest]) = evalBody rest
 eval (List ((:) (Atom "begin") rest)) = evalBody $ List rest
-eval (List [Atom "define", varExpr, expr]) = do
-  varAtom <- ensureAtom varExpr
-  evalVal <- eval expr
-  env <- ask
-  let envFn = const $ Map.insert (extractVar varAtom) evalVal env
-   in local envFn $ return varExpr
+eval (List [Atom "define", varExpr, defExpr]) --top-level define
+ = do
+  EnvCtx {} <- ask
+  _varAtom <- ensureAtom varExpr
+  _evalVal <- eval defExpr
+  bindArgsEval [varExpr] [defExpr] varExpr
 eval (List [Atom "lambda", List params, expr]) = do
-  envLocal <- ask
-  return $ Lambda (IFunc $ applyLambda expr params) envLocal
-eval (List (Atom "lambda":_)) = throw $ BadSpecialForm "lambda"
+  asks (Lambda (IFunc $ applyLambda expr params))
+eval (List (Atom "lambda":_)) =
+  throw $
+  BadSpecialForm
+    "lambda function expects list of parameters and S-Expression body\n(lambda <params> <s-expr>)"
 eval (List ((:) x xs)) = do
+  EnvCtx {..} <- ask
   funVar <- eval x
   xVal <- mapM eval xs
   case funVar of
     (Fun (IFunc internalFn)) -> internalFn xVal
-    (Lambda (IFunc internalfn) boundenv) ->
-      local (const boundenv) $ internalfn xVal
+    (Lambda (IFunc definedFn) (EnvCtx benv _bfenv)) ->
+      local (const $ EnvCtx benv fenv) $ definedFn xVal
     _ -> throw $ NotFunction funVar

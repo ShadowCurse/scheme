@@ -13,11 +13,19 @@ module LispVal
 import qualified Data.Map as Map
 import qualified Data.Text as T
 
--- import Control.Monad.Except
-import Control.Exception ( Exception )
+import Control.Exception (Exception)
 import Control.Monad.Reader (MonadIO, MonadReader, ReaderT(ReaderT))
 
-type EnvCtx = Map.Map T.Text LispVal
+type ValCtx = Map.Map T.Text LispVal
+
+type FnCtx = Map.Map T.Text LispVal
+
+data EnvCtx =
+  EnvCtx
+    { env :: ValCtx
+    , fenv :: FnCtx
+    }
+  deriving (Eq)
 
 newtype Eval a =
   Eval
@@ -45,8 +53,8 @@ showVal val =
     (Atom atom) -> atom
     (String str) -> T.concat ["\"", str, "\""]
     (Number num) -> T.pack $ show num
-    (Bool True) -> "#t"
-    (Bool False) -> "#f"
+    (Bool True) -> "true"
+    (Bool False) -> "false"
     Nil -> "Nil"
     (List contents) -> T.concat ["(", T.unwords $ showVal <$> contents, ")"]
     (Fun _) -> "(internal function)"
@@ -78,18 +86,31 @@ instance Show LispException where
   show = T.unpack . showError
 
 unwordsList :: [LispVal] -> T.Text
-unwordsList list = T.unwords $  showVal <$> list
+unwordsList list = T.unwords $ showVal <$> list
 
 showError :: LispException -> T.Text
 showError err =
   case err of
-    (IOError txt)          -> T.concat ["Error reading file: ", txt]
-    (NumArgs int args)     -> T.concat ["Error Number Arguments, expected ", T.pack $ show int, " recieved args: ", unwordsList args]
-    (LengthOfList txt int) -> T.concat ["Error Length of List in ", txt, " length: ", T.pack $ show int]
-    (ExpectedList txt)     -> T.concat ["Error Expected List in funciton ", txt]
-    (TypeMismatch txt val) -> T.concat ["Error Type Mismatch: ", txt, showVal val]
-    (BadSpecialForm txt)   -> T.concat ["Error Bad Special Form: ", txt]
-    (NotFunction val)      -> T.concat ["Error Not a Function: ", showVal val]
-    (UnboundVar txt)       -> T.concat ["Error Unbound Variable: ", txt]
-    (PError str)           -> T.concat ["Parser Error, expression cannot evaluate: ",T.pack str]
-    (Default val)          -> T.concat ["Error, Danger Will Robinson! Evaluation could not proceed!  ", showVal val]
+    (IOError txt) -> T.concat ["Error reading file: ", txt]
+    (NumArgs int args) ->
+      T.concat
+        [ "Error Number Arguments, expected "
+        , T.pack $ show int
+        , " recieved args: "
+        , unwordsList args
+        ]
+    (LengthOfList txt int) ->
+      T.concat ["Error Length of List in ", txt, " length: ", T.pack $ show int]
+    (ExpectedList txt) -> T.concat ["Error Expected List in funciton ", txt]
+    (TypeMismatch txt val) ->
+      T.concat ["Error Type Mismatch: ", txt, showVal val]
+    (BadSpecialForm txt) -> T.concat ["Error Bad Special Form: ", txt]
+    (NotFunction val) -> T.concat ["Error Not a Function: ", showVal val]
+    (UnboundVar txt) -> T.concat ["Error Unbound Variable: ", txt]
+    (PError str) ->
+      T.concat ["Parser Error, expression cannot evaluate: ", T.pack str]
+    (Default val) ->
+      T.concat
+        [ "Error, Danger Will Robinson! Evaluation could not proceed!  "
+        , showVal val
+        ]
